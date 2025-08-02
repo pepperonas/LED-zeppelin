@@ -460,13 +460,39 @@ def main():
     detector.add_beat_callback(on_beat)
     detector.add_audio_callback(on_audio_frame)
     
-    # Start audio detection - try real audio first, fallback to demo mode
-    if not detector.start():
-        print("❌ Mikrofon nicht verfügbar - starte DEMO MODUS!")
-        print("🎵 Simuliert Musik mit 120 BPM für LED-Test")
-        print("💡 Demo Modus ist perfekt zum Testen der LED-Effekte!")
+    # Ask user for audio mode preference
+    print("\n🎵 Audio Modus wählen:")
+    print("  1) Mikrofon-Modus (kann ALSA-Fehler verursachen)")
+    print("  2) Demo-Modus (perfekt glatte Animationen, keine Audio-Probleme)")
+    print("  3) Auto-Demo (startet direkt mit Demo-Modus)")
+    
+    import sys
+    import select
+    
+    # Check if we're running interactively
+    if sys.stdin.isatty():
+        print("\nWähle (1/2/3) oder drücke Enter für Demo-Modus: ", end="", flush=True)
+        # Non-blocking input with timeout
+        if select.select([sys.stdin], [], [], 3.0) == ([sys.stdin], [], []):
+            choice = input().strip()
+        else:
+            choice = "2"  # Default to demo mode after 3 seconds
+    else:
+        choice = "2"  # Default to demo mode for non-interactive runs
+    
+    # Start appropriate mode
+    if choice == "1":
+        print("🎤 Starte Mikrofon-Modus...")
+        if not detector.start():
+            print("❌ Mikrofon fehlgeschlagen - wechsle zu Demo-Modus")
+            if not detector.start(demo_mode=True):
+                print("❌ Fehler beim Starten des Audio-Detektors!")
+                return
+    else:
+        print("🎵 Starte Demo-Modus für perfekte LED-Animationen!")
+        print("💡 120 BPM Simulation - keine Mikrofon-Probleme!")
         if not detector.start(demo_mode=True):
-            print("❌ Fehler beim Starten des Audio-Detektors!")
+            print("❌ Fehler beim Starten des Demo-Modus!")
             return
     
     try:
