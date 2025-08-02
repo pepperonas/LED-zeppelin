@@ -25,6 +25,11 @@ class BeatDetector:
         self.min_beat_interval = 0.15  # Minimum time between beats (150ms)
         self.last_beat_time = 0
         
+        # Audio error tracking
+        self.consecutive_errors = 0
+        self.max_errors_before_demo = 20  # Switch to demo after 20 consecutive errors
+        self.demo_mode_active = False
+        
         # Current audio data
         self.current_energy = 0
         self.current_volume = 0
@@ -66,11 +71,12 @@ class BeatDetector:
     def start(self, demo_mode=False):
         """Start audio capture and beat detection"""
         if self.running:
-            return
+            return True
         
         # Demo mode - simulate audio without microphone
         if demo_mode:
             print("🎵 Starting in DEMO MODE - no microphone required!")
+            self.demo_mode_active = True
             self.running = True
             # Start demo thread
             import threading
@@ -276,14 +282,26 @@ class BeatDetector:
                             
         except Exception as e:
             if self.running:
-                print(f"Audio processing error: {e}")
-                # On repeated errors, don't spam the console
-                if not hasattr(self, '_error_count'):
-                    self._error_count = 0
-                self._error_count += 1
-                if self._error_count > 10:
-                    print("Too many audio errors - stopping stream")
-                    self.running = False
+                self.consecutive_errors += 1
+                
+                # Only print first few errors to avoid spam
+                if self.consecutive_errors <= 5:
+                    print(f"Audio processing error: {e}")
+                elif self.consecutive_errors == 6:
+                    print("More audio errors occurring (suppressing output)...")
+                
+                # Switch to demo mode if too many errors
+                if self.consecutive_errors >= self.max_errors_before_demo and not self.demo_mode_active:
+                    print(f"\n🚨 Too many audio errors ({self.consecutive_errors}) - switching to DEMO MODE")
+                    print("🎵 Demo mode provides smooth visualization without microphone issues!")
+                    
+                    # Stop current stream and switch to demo
+                    self._switch_to_demo_mode()
+                    return (None, pyaudio.paContinue)
+        
+        # Reset error count on successful processing  
+        if self.running and 'audio_data' in locals():
+            self.consecutive_errors = 0
         
         return (None, pyaudio.paContinue if self.running else pyaudio.paComplete)
     
@@ -325,6 +343,27 @@ class BeatDetector:
             return True
         
         return False
+    
+    def _switch_to_demo_mode(self):
+        """Switch from real audio to demo mode due to errors"""
+        try:
+            # Stop current audio stream
+            if self.stream:
+                if self.stream.is_active():
+                    self.stream.stop_stream()
+                self.stream.close()
+                self.stream = None
+            
+            # Mark as demo mode
+            self.demo_mode_active = True
+            
+            # Start demo thread
+            import threading
+            demo_thread = threading.Thread(target=self._demo_mode_loop, daemon=True)
+            demo_thread.start()
+            
+        except Exception as e:
+            print(f"Error switching to demo mode: {e}")
     
     def get_current_audio_info(self):
         """Get current audio analysis data"""

@@ -464,6 +464,7 @@ def main():
     if not detector.start():
         print("❌ Mikrofon nicht verfügbar - starte DEMO MODUS!")
         print("🎵 Simuliert Musik mit 120 BPM für LED-Test")
+        print("💡 Demo Modus ist perfekt zum Testen der LED-Effekte!")
         if not detector.start(demo_mode=True):
             print("❌ Fehler beim Starten des Audio-Detektors!")
             return
