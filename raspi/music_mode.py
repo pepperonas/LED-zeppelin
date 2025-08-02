@@ -48,6 +48,7 @@ except Exception as e:
         print("💡 Try running: sudo killall python3 && sudo systemctl restart pigpiod")
         exit(1)
 leds = [(0, 0, 0)] * LED_COUNT
+previous_leds = [(0, 0, 0)] * LED_COUNT  # For smooth transitions
 
 # Timing für WS2812B (gleich wie party_mode.py)
 T1H_NS = 800
@@ -62,6 +63,9 @@ beat_intensity = 0
 bass_level = 0
 energy_history = []
 beat_flash_time = 0
+led_update_rate = 30  # Target FPS for smooth animations
+last_led_update = 0
+shutdown_requested = False
 
 def precise_delay_ns(nanoseconds):
     if nanoseconds < 10000:
@@ -88,27 +92,48 @@ def send_byte(byte):
         send_bit(byte & (1 << bit))
 
 def send_to_strip():
-    led_output.off()
-    precise_delay_ns(RESET_NS)
+    global shutdown_requested, previous_leds
+    if shutdown_requested or not led_output:
+        return
     
-    for r, g, b in leds:
-        r = int(r * BRIGHTNESS)
-        g = int(g * BRIGHTNESS)
-        b = int(b * BRIGHTNESS)
-        send_byte(g)
-        send_byte(r)
-        send_byte(b)
-    
-    led_output.off()
-    precise_delay_ns(RESET_NS)
+    try:
+        # Store current state for next smoothing
+        previous_leds = leds.copy()
+        
+        led_output.off()
+        precise_delay_ns(RESET_NS)
+        
+        for r, g, b in leds:
+            if shutdown_requested:
+                return
+            r = int(r * BRIGHTNESS)
+            g = int(g * BRIGHTNESS)
+            b = int(b * BRIGHTNESS)
+            send_byte(g)
+            send_byte(r)
+            send_byte(b)
+        
+        led_output.off()
+        precise_delay_ns(RESET_NS)
+    except Exception as e:
+        if not shutdown_requested:
+            print(f"Strip send error: {e}")
 
 def clear():
     global leds
     leds = [(0, 0, 0)] * LED_COUNT
     send_to_strip()
 
-def set_pixel(index, r, g, b):
+def set_pixel(index, r, g, b, smooth_factor=0.7):
+    """Set pixel with optional smoothing"""
     if 0 <= index < LED_COUNT:
+        # Apply smoothing by blending with previous value
+        if smooth_factor < 1.0:
+            old_r, old_g, old_b = previous_leds[index]
+            r = int(old_r * (1 - smooth_factor) + r * smooth_factor)
+            g = int(old_g * (1 - smooth_factor) + g * smooth_factor)
+            b = int(old_b * (1 - smooth_factor) + b * smooth_factor)
+        
         leds[index] = (max(0, min(255, r)), max(0, min(255, g)), max(0, min(255, b)))
 
 def hsv_to_rgb(h, s, v):
@@ -136,36 +161,44 @@ def hsv_to_rgb(h, s, v):
 # 🎵 MUSIC REACTIVE EFFECTS
 
 def spectrum_analyzer(freq_bands, volume):
-    """Frequency spectrum analyzer visualization"""
-    # Clear strip
-    clear()
+    """Frequency spectrum analyzer visualization with smooth transitions"""
+    # Don't clear - let smoothing handle the fade
     
     # Map frequency bands to LED sections
     band_size = LED_COUNT // 4
+    
+    # Clear all pixels with fade
+    for i in range(LED_COUNT):
+        set_pixel(i, 0, 0, 0, smooth_factor=0.3)  # Slower fade out
     
     for band_idx, energy in enumerate(freq_bands):
         start_led = band_idx * band_size
         end_led = min((band_idx + 1) * band_size, LED_COUNT)
         
-        # Scale energy to LED height
-        energy_scaled = min(1.0, energy * 50)  # Adjust sensitivity
+        # Scale energy to LED height with better sensitivity
+        energy_scaled = min(1.0, energy * 30)  # Reduced sensitivity for smoother motion
         leds_to_light = int(energy_scaled * band_size)
         
-        # Color for each band
+        # Enhanced colors for each band
         colors = [
-            (255, 0, 0),    # Bass - Red
-            (255, 127, 0),  # Low-mid - Orange
-            (0, 255, 0),    # High-mid - Green
-            (0, 0, 255)     # Treble - Blue
+            (255, 50, 50),   # Bass - Bright Red
+            (255, 150, 0),   # Low-mid - Orange
+            (50, 255, 50),   # High-mid - Bright Green
+            (100, 100, 255)  # Treble - Bright Blue
         ]
         
-        # Light up LEDs for this band
-        for i in range(leds_to_light):
+        # Light up LEDs for this band with smooth transitions
+        for i in range(band_size):
             led_pos = start_led + i
-            # Intensity decreases from bottom to top
-            intensity = 1.0 - (i / band_size)
-            r, g, b = colors[band_idx]
-            set_pixel(led_pos, int(r * intensity), int(g * intensity), int(b * intensity))
+            
+            if i < leds_to_light:
+                # Intensity decreases from bottom to top
+                intensity = 1.0 - (i / band_size) * 0.7  # Less dramatic fade
+                r, g, b = colors[band_idx]
+                set_pixel(led_pos, int(r * intensity), int(g * intensity), int(b * intensity), smooth_factor=0.6)
+            else:
+                # Fade out unused LEDs
+                set_pixel(led_pos, 0, 0, 0, smooth_factor=0.2)
 
 def beat_flash(energy, volume, freq_bands):
     """Flash effect on beat detection"""
@@ -192,7 +225,7 @@ def beat_flash(energy, volume, freq_bands):
         set_pixel(i, int(r * flash_brightness), int(g * flash_brightness), int(b * flash_brightness))
 
 def energy_wave(freq_bands, volume):
-    """Moving wave based on energy levels"""
+    """Moving wave based on energy levels with smooth motion"""
     global energy_history
     
     # Add current energy to history
@@ -201,18 +234,22 @@ def energy_wave(freq_bands, volume):
     if len(energy_history) > LED_COUNT:
         energy_history.pop(0)
     
-    # Create wave effect
+    # Clear with fade
+    for i in range(LED_COUNT):
+        set_pixel(i, 0, 0, 0, smooth_factor=0.1)
+    
+    # Create wave effect with smoother motion
     for i in range(min(len(energy_history), LED_COUNT)):
         energy_val = energy_history[i] if i < len(energy_history) else 0
         
         # Scale energy to color intensity
-        intensity = min(1.0, energy_val * 100)
+        intensity = min(1.0, energy_val * 80)  # Adjusted sensitivity
         
-        # Create color based on position and energy
-        hue = (i * 2 + time.time() * 50) % 360
-        r, g, b = hsv_to_rgb(hue, 1.0, intensity)
+        # Create color based on position and energy with slower movement
+        hue = (i * 3 + time.time() * 30) % 360  # Slower color cycling
+        r, g, b = hsv_to_rgb(hue, 0.9, intensity)
         
-        set_pixel(LED_COUNT - 1 - i, r, g, b)
+        set_pixel(LED_COUNT - 1 - i, r, g, b, smooth_factor=0.7)
 
 def bass_pulse(freq_bands, volume):
     """Pulse effect focused on bass frequencies"""
@@ -243,9 +280,9 @@ def bass_pulse(freq_bands, volume):
             set_pixel(i, 0, 0, 0)
 
 def reactive_rainbow(freq_bands, volume):
-    """Rainbow effect that reacts to music"""
-    # Rainbow speed based on volume
-    speed = volume * 200
+    """Rainbow effect that reacts to music with smooth motion"""
+    # Rainbow speed based on volume but more controlled
+    speed = 50 + (volume * 100)  # Base speed + volume boost
     
     for i in range(LED_COUNT):
         # Hue based on position and time, speed influenced by volume
@@ -253,11 +290,11 @@ def reactive_rainbow(freq_bands, volume):
         
         # Saturation and brightness based on frequency bands
         total_energy = sum(freq_bands) if freq_bands else 0
-        brightness = 0.3 + (total_energy * 20)  # Minimum brightness + energy boost
+        brightness = 0.4 + (total_energy * 15)  # Minimum brightness + energy boost
         brightness = min(1.0, brightness)
         
-        r, g, b = hsv_to_rgb(hue, 1.0, brightness)
-        set_pixel(i, r, g, b)
+        r, g, b = hsv_to_rgb(hue, 0.9, brightness)
+        set_pixel(i, r, g, b, smooth_factor=0.8)  # Very smooth transitions
 
 def strobe_beat(freq_bands, volume):
     """Strobe effect synchronized with beats"""
@@ -284,31 +321,47 @@ def on_beat(energy, volume, freq_bands):
         beat_flash(energy, volume, freq_bands)
 
 def on_audio_frame(energy, volume, freq_bands, beat_detected):
-    """Called for every audio frame"""
-    global current_mode
+    """Called for every audio frame with frame rate limiting"""
+    global current_mode, last_led_update, shutdown_requested
+    
+    if shutdown_requested:
+        return
+    
+    current_time = time.time()
+    
+    # Frame rate limiting for smoother LED updates
+    if current_time - last_led_update < (1.0 / led_update_rate):
+        return
+    
+    last_led_update = current_time
     
     # Live volume display (update every ~100ms for more responsive feedback)
     if hasattr(on_audio_frame, 'last_display_time'):
-        if time.time() - on_audio_frame.last_display_time > 0.1:
+        if current_time - on_audio_frame.last_display_time > 0.1:
             display_live_audio(energy, volume, freq_bands, beat_detected)
-            on_audio_frame.last_display_time = time.time()
+            on_audio_frame.last_display_time = current_time
     else:
-        on_audio_frame.last_display_time = time.time()
+        on_audio_frame.last_display_time = current_time
     
-    if current_mode == "spectrum":
-        spectrum_analyzer(freq_bands, volume)
-    elif current_mode == "energy_wave":
-        energy_wave(freq_bands, volume)
-    elif current_mode == "bass_pulse":
-        bass_pulse(freq_bands, volume)
-    elif current_mode == "reactive_rainbow":
-        reactive_rainbow(freq_bands, volume)
-    elif current_mode == "strobe" and not beat_detected:
-        # Keep strobe dark between beats
-        strobe_beat(freq_bands, volume)
-    
-    # Update LEDs
-    send_to_strip()
+    try:
+        if current_mode == "spectrum":
+            spectrum_analyzer(freq_bands, volume)
+        elif current_mode == "energy_wave":
+            energy_wave(freq_bands, volume)
+        elif current_mode == "bass_pulse":
+            bass_pulse(freq_bands, volume)
+        elif current_mode == "reactive_rainbow":
+            reactive_rainbow(freq_bands, volume)
+        elif current_mode == "strobe" and not beat_detected:
+            # Keep strobe dark between beats
+            strobe_beat(freq_bands, volume)
+        
+        # Update LEDs safely
+        if led_output and not shutdown_requested:
+            send_to_strip()
+    except Exception as e:
+        if not shutdown_requested:
+            print(f"LED update error: {e}")
 
 def display_live_audio(energy, volume, freq_bands, beat_detected):
     """Display enhanced live audio levels with improved visualization"""
@@ -383,7 +436,7 @@ def cycle_mode():
     print(f"🎛️ Switched to mode: {current_mode}")
 
 def main():
-    global current_mode
+    global current_mode, shutdown_requested
     
     print("🎵🔥🔥🔥 MUSIC MODE AKTIVIERT! 🔥🔥🔥🎵")
     print("300 LEDs - BEAT-REACTIVE - GEILE MUSIK-VISUALISIERUNG!")
@@ -425,26 +478,44 @@ def main():
         import sys
         
         def mode_switcher():
-            while True:
-                # Non-blocking input check
-                if select.select([sys.stdin], [], [], 0) == ([sys.stdin], [], []):
-                    input()  # Consume the input
-                    cycle_mode()
+            nonlocal shutdown_requested
+            while not shutdown_requested:
+                try:
+                    # Non-blocking input check
+                    if select.select([sys.stdin], [], [], 0.1) == ([sys.stdin], [], []):
+                        input()  # Consume the input
+                        if not shutdown_requested:
+                            cycle_mode()
+                except:
+                    break
                 time.sleep(0.1)
         
         # Start mode switching thread
-        mode_thread = threading.Thread(target=mode_switcher, daemon=True)
+        mode_thread = threading.Thread(target=mode_switcher, daemon=False)
         mode_thread.start()
         
         # Main loop
-        while True:
+        while not shutdown_requested:
             time.sleep(0.1)
             
     except KeyboardInterrupt:
+        shutdown_requested = True
         print("\n🎉 MUSIC MODE ENDE! 🎉")
-        detector.stop()
-        clear()
-        cleanup_gpio()
+        
+        # Proper shutdown sequence
+        try:
+            detector.stop()
+            time.sleep(0.2)  # Allow audio callbacks to finish
+            clear()
+            cleanup_gpio()
+            
+            # Wait for mode thread to finish
+            if 'mode_thread' in locals() and mode_thread.is_alive():
+                mode_thread.join(timeout=1.0)
+        except Exception as e:
+            print(f"Shutdown error: {e}")
+        
+        print("✅ Clean shutdown completed")
 
 if __name__ == "__main__":
     main()

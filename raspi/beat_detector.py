@@ -6,7 +6,6 @@ import threading
 import time
 import random
 from collections import deque
-from scipy.signal import butter, filtfilt
 
 class BeatDetector:
     def __init__(self, sample_rate=44100, chunk_size=1024):
@@ -32,26 +31,29 @@ class BeatDetector:
         self.current_freq_bands = [0, 0, 0, 0]  # Bass, Low-mid, High-mid, Treble
         self.beat_detected = False
         
-        # Frequency band filters (bass, low-mid, high-mid, treble)
+        # Frequency band ranges (bass, low-mid, high-mid, treble)
         self.freq_ranges = [(60, 250), (250, 500), (500, 2000), (2000, 8000)]
-        self.filters = self._create_bandpass_filters()
         
         # Callbacks
         self.beat_callbacks = []
         self.audio_callbacks = []
     
-    def _create_bandpass_filters(self):
-        """Create bandpass filters for frequency analysis"""
-        filters = []
-        nyquist = self.sample_rate // 2
+    def _simple_bandpass(self, audio_data, low_freq, high_freq):
+        """Simple frequency band extraction using FFT"""
+        if len(audio_data) < 64:
+            return 0
         
-        for low, high in self.freq_ranges:
-            low_norm = low / nyquist
-            high_norm = min(high / nyquist, 0.99)
-            b, a = butter(4, [low_norm, high_norm], btype='band')
-            filters.append((b, a))
+        # FFT analysis
+        fft = np.fft.rfft(audio_data)
+        freqs = np.fft.rfftfreq(len(audio_data), 1/self.sample_rate)
         
-        return filters
+        # Find frequency range indices
+        low_idx = np.searchsorted(freqs, low_freq)
+        high_idx = np.searchsorted(freqs, high_freq)
+        
+        # Extract energy in this band
+        band_energy = np.sum(np.abs(fft[low_idx:high_idx]) ** 2)
+        return band_energy
     
     def add_beat_callback(self, callback):
         """Add callback function to be called when beat is detected"""
@@ -120,8 +122,6 @@ class BeatDetector:
             if optimal_rate != self.sample_rate:
                 print(f"🎵 Adjusting sample rate from {self.sample_rate} to {optimal_rate}")
                 self.sample_rate = optimal_rate
-                # Recreate filters with new sample rate
-                self.filters = self._create_bandpass_filters()
             
             # Try different configurations for better compatibility
             configs = [
@@ -160,7 +160,6 @@ class BeatDetector:
                     if 'rate' in config and config['rate'] != self.sample_rate:
                         print(f"🎵 Using sample rate: {config['rate']} Hz")
                         self.sample_rate = config['rate']
-                        self.filters = self._create_bandpass_filters()
                     stream_opened = True
                     break
                 except Exception as e:
@@ -188,63 +187,88 @@ class BeatDetector:
         return True
     
     def stop(self):
-        """Stop audio capture"""
+        """Stop audio capture with proper cleanup"""
         self.running = False
+        
+        # Give time for callbacks to finish
+        time.sleep(0.1)
+        
         if self.stream:
-            self.stream.stop_stream()
-            self.stream.close()
+            try:
+                if self.stream.is_active():
+                    self.stream.stop_stream()
+                self.stream.close()
+                self.stream = None
+            except Exception as e:
+                print(f"Stream cleanup warning: {e}")
+        
+        # Terminate audio system
+        try:
+            if hasattr(self, 'audio') and self.audio:
+                self.audio.terminate()
+                self.audio = None
+        except Exception as e:
+            print(f"Audio termination warning: {e}")
+        
         print("🔇 Beat detector stopped")
     
     def _audio_callback(self, in_data, frame_count, time_info, status):
-        """Process audio data in real-time"""
+        """Process audio data in real-time with error handling"""
         if not self.running:
             return (None, pyaudio.paComplete)
         
-        # Convert to numpy array
-        audio_data = np.frombuffer(in_data, dtype=np.int16).astype(np.float32)
-        audio_data = audio_data / 32768.0  # Normalize to [-1, 1]
+        try:
+            # Convert to numpy array
+            audio_data = np.frombuffer(in_data, dtype=np.int16).astype(np.float32)
+            audio_data = audio_data / 32768.0  # Normalize to [-1, 1]
+            
+            # Calculate overall energy and volume
+            energy = np.sum(audio_data ** 2)
+            volume = np.sqrt(np.mean(audio_data ** 2))
+            
+            self.current_energy = energy
+            self.current_volume = volume
+            
+            # Frequency band analysis
+            self.current_freq_bands = self._analyze_frequency_bands(audio_data)
+            
+            # Beat detection
+            self.beat_detected = self._detect_beat(energy)
+            
+            # Call callbacks safely
+            if self.beat_detected and self.running:
+                for callback in self.beat_callbacks:
+                    try:
+                        if self.running:  # Check again before each callback
+                            callback(energy, volume, self.current_freq_bands)
+                    except Exception as e:
+                        if self.running:
+                            print(f"Beat callback error: {e}")
+            
+            if self.running:
+                for callback in self.audio_callbacks:
+                    try:
+                        if self.running:  # Check again before each callback
+                            callback(energy, volume, self.current_freq_bands, self.beat_detected)
+                    except Exception as e:
+                        if self.running:
+                            print(f"Audio callback error: {e}")
+                            
+        except Exception as e:
+            if self.running:
+                print(f"Audio processing error: {e}")
         
-        # Calculate overall energy and volume
-        energy = np.sum(audio_data ** 2)
-        volume = np.sqrt(np.mean(audio_data ** 2))
-        
-        self.current_energy = energy
-        self.current_volume = volume
-        
-        # Frequency band analysis
-        self.current_freq_bands = self._analyze_frequency_bands(audio_data)
-        
-        # Beat detection
-        self.beat_detected = self._detect_beat(energy)
-        
-        # Call callbacks
-        if self.beat_detected:
-            for callback in self.beat_callbacks:
-                try:
-                    callback(energy, volume, self.current_freq_bands)
-                except Exception as e:
-                    print(f"Beat callback error: {e}")
-        
-        for callback in self.audio_callbacks:
-            try:
-                callback(energy, volume, self.current_freq_bands, self.beat_detected)
-            except Exception as e:
-                print(f"Audio callback error: {e}")
-        
-        return (None, pyaudio.paContinue)
+        return (None, pyaudio.paContinue if self.running else pyaudio.paComplete)
     
     def _analyze_frequency_bands(self, audio_data):
-        """Analyze energy in different frequency bands"""
-        if len(audio_data) < 50:  # Too short for filtering
+        """Analyze energy in different frequency bands using FFT"""
+        if len(audio_data) < 64:  # Too short for FFT
             return [0, 0, 0, 0]
         
         bands = []
-        for b, a in self.filters:
+        for low_freq, high_freq in self.freq_ranges:
             try:
-                # Apply bandpass filter
-                filtered = filtfilt(b, a, audio_data)
-                # Calculate energy in this band
-                band_energy = np.sum(filtered ** 2)
+                band_energy = self._simple_bandpass(audio_data, low_freq, high_freq)
                 bands.append(band_energy)
             except:
                 bands.append(0)
@@ -338,10 +362,12 @@ class BeatDetector:
             time.sleep(0.05)  # 20 FPS
     
     def __del__(self):
-        """Cleanup"""
-        if hasattr(self, 'audio'):
-            self.stop()
-            self.audio.terminate()
+        """Cleanup with error handling"""
+        try:
+            if hasattr(self, 'running') and self.running:
+                self.stop()
+        except:
+            pass  # Ignore errors during cleanup
 
 # Test the beat detector
 if __name__ == "__main__":
