@@ -478,7 +478,7 @@ def main():
         import sys
         
         def mode_switcher():
-            nonlocal shutdown_requested
+            global shutdown_requested
             while not shutdown_requested:
                 try:
                     # Non-blocking input check
