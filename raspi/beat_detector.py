@@ -8,9 +8,9 @@ import random
 from collections import deque
 
 class BeatDetector:
-    def __init__(self, sample_rate=44100, chunk_size=1024):
+    def __init__(self, sample_rate=44100, chunk_size=2048):
         self.sample_rate = sample_rate
-        self.chunk_size = chunk_size
+        self.chunk_size = chunk_size  # Larger buffer to reduce underruns
         self.format = pyaudio.paInt16
         self.channels = 1
         
@@ -125,41 +125,62 @@ class BeatDetector:
             
             # Try different configurations for better compatibility
             configs = [
-                # Try with the detected device
+                # Try with larger buffer and detected device
                 {
                     'format': self.format,
                     'channels': self.channels,
                     'rate': self.sample_rate,
                     'input': True,
                     'input_device_index': device_index,
-                    'frames_per_buffer': self.chunk_size
+                    'frames_per_buffer': self.chunk_size,
+                    'stream_callback': self._audio_callback
                 },
-                # Try with default device
+                # Try with even larger buffer
                 {
                     'format': self.format,
                     'channels': self.channels,
                     'rate': self.sample_rate,
                     'input': True,
-                    'frames_per_buffer': self.chunk_size
+                    'input_device_index': device_index,
+                    'frames_per_buffer': self.chunk_size * 2,
+                    'stream_callback': self._audio_callback
                 },
-                # Try with lower sample rate
+                # Try with lower sample rate and larger buffer
                 {
                     'format': self.format,
                     'channels': self.channels,
                     'rate': 22050,
                     'input': True,
                     'input_device_index': device_index,
-                    'frames_per_buffer': self.chunk_size
+                    'frames_per_buffer': self.chunk_size,
+                    'stream_callback': self._audio_callback
+                },
+                # Fallback to default device
+                {
+                    'format': self.format,
+                    'channels': self.channels,
+                    'rate': 22050,
+                    'input': True,
+                    'frames_per_buffer': self.chunk_size * 2,
+                    'stream_callback': self._audio_callback
                 }
             ]
             
             stream_opened = False
             for i, config in enumerate(configs):
                 try:
-                    self.stream = self.audio.open(stream_callback=self._audio_callback, **config)
+                    # Extract callback from config
+                    callback = config.pop('stream_callback')
+                    self.stream = self.audio.open(stream_callback=callback, **config)
+                    
                     if 'rate' in config and config['rate'] != self.sample_rate:
                         print(f"🎵 Using sample rate: {config['rate']} Hz")
                         self.sample_rate = config['rate']
+                    
+                    if 'frames_per_buffer' in config:
+                        self.chunk_size = config['frames_per_buffer']
+                        print(f"🎵 Using buffer size: {self.chunk_size} frames")
+                    
                     stream_opened = True
                     break
                 except Exception as e:
@@ -167,22 +188,21 @@ class BeatDetector:
                     continue
             
             if not stream_opened:
-                raise Exception("Failed to open audio stream with any configuration")
+                print("❌ All audio configurations failed - falling back to demo mode")
+                return self.start(demo_mode=True)
             
             self.running = True
             self.stream.start_stream()
             print(f"🎵 Beat detector started successfully!")
             print(f"   Device: {device_info['name']}")
             print(f"   Sample Rate: {self.sample_rate} Hz")
+            print(f"   Buffer Size: {self.chunk_size} frames")
             print(f"   Channels: {self.channels}")
             
         except Exception as e:
             print(f"❌ Audio setup failed: {e}")
-            print("💡 Try:")
-            print("   - Check if your USB microphone is connected")
-            print("   - Run: arecord -l")
-            print("   - Test recording: arecord -D plughw:0,0 -f S16_LE -r 44100 -c 1 test.wav")
-            return False
+            print("🎵 Falling back to demo mode...")
+            return self.start(demo_mode=True)
         
         return True
     
@@ -257,6 +277,13 @@ class BeatDetector:
         except Exception as e:
             if self.running:
                 print(f"Audio processing error: {e}")
+                # On repeated errors, don't spam the console
+                if not hasattr(self, '_error_count'):
+                    self._error_count = 0
+                self._error_count += 1
+                if self._error_count > 10:
+                    print("Too many audio errors - stopping stream")
+                    self.running = False
         
         return (None, pyaudio.paContinue if self.running else pyaudio.paComplete)
     
@@ -312,21 +339,30 @@ class BeatDetector:
         """Demo mode that simulates music beats and audio data"""
         import math
         print("🎵 Demo mode running - simulating music with 120 BPM")
+        print("🎵 This mode doesn't require a microphone - perfect for testing!")
         
         beat_interval = 60.0 / 120.0  # 120 BPM
         last_beat_time = 0
+        frame_count = 0
         
         while self.running:
             current_time = time.time()
+            frame_count += 1
             
-            # Simulate audio data with sine waves
+            # Simulate more realistic audio data
             t = current_time
             
-            # Simulate frequency bands (bass, low-mid, high-mid, treble)
-            bass = 0.3 + 0.7 * abs(math.sin(t * 2))
-            low_mid = 0.2 + 0.6 * abs(math.sin(t * 3 + 1))
-            high_mid = 0.1 + 0.5 * abs(math.sin(t * 5 + 2))
-            treble = 0.05 + 0.4 * abs(math.sin(t * 7 + 3))
+            # Simulate frequency bands with more variation
+            bass = 0.2 + 0.8 * abs(math.sin(t * 1.5 + math.sin(t * 0.3)))
+            low_mid = 0.1 + 0.7 * abs(math.sin(t * 2.5 + math.cos(t * 0.7)))
+            high_mid = 0.05 + 0.6 * abs(math.sin(t * 4 + math.sin(t * 1.1)))
+            treble = 0.02 + 0.5 * abs(math.sin(t * 6 + math.cos(t * 1.4)))
+            
+            # Add some randomness for more realistic feel
+            bass *= (0.8 + 0.4 * random.random())
+            low_mid *= (0.8 + 0.4 * random.random())
+            high_mid *= (0.8 + 0.4 * random.random())
+            treble *= (0.8 + 0.4 * random.random())
             
             self.current_freq_bands = [bass, low_mid, high_mid, treble]
             
@@ -335,7 +371,7 @@ class BeatDetector:
             self.current_energy = total_energy
             self.current_volume = total_energy / 4
             
-            # Simulate beats at 120 BPM
+            # Simulate beats at 120 BPM with some variation
             beat_detected = False
             if current_time - last_beat_time >= beat_interval:
                 beat_detected = True
@@ -351,14 +387,17 @@ class BeatDetector:
                     try:
                         callback(self.current_energy, self.current_volume, self.current_freq_bands)
                     except Exception as e:
-                        print(f"Beat callback error: {e}")
+                        if self.running:
+                            print(f"Beat callback error: {e}")
             
             for callback in self.audio_callbacks:
                 try:
                     callback(self.current_energy, self.current_volume, self.current_freq_bands, beat_detected)
                 except Exception as e:
-                    print(f"Audio callback error: {e}")
+                    if self.running:
+                        print(f"Audio callback error: {e}")
             
+            # Consistent timing
             time.sleep(0.05)  # 20 FPS
     
     def __del__(self):
